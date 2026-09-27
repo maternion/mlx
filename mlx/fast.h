@@ -60,9 +60,6 @@ MLX_API array scaled_dot_product_attention(
     bool force_fused = false,
     StreamOrDevice s = {});
 
-// Chunked gated-delta update (prefill path). Upstream MLX implements this as
-// a fused Metal kernel; the ROCm fork declares it so mlxc's C binding links,
-// but it is never called here (the Go side gates it behind MetalIsAvailable).
 MLX_API std::vector<array> gated_delta_update(
     const array& queries,
     const array& keys,

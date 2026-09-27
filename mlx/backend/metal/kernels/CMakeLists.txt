@@ -17,7 +17,8 @@ function(build_kernel_base TARGET SRCFILE DEPS)
       -Wextra
       -fno-fast-math
       -Wno-c++17-extensions
-      -Wno-c++20-extensions)
+      -Wno-c++20-extensions
+      -Wmetal-addr-spaces)
   if(MLX_METAL_DEBUG)
     set(METAL_FLAGS ${METAL_FLAGS} -gline-tables-only -frecord-sources)
   endif()
@@ -48,11 +49,13 @@ endfunction(build_kernel)
 
 build_kernel(arg_reduce)
 build_kernel(conv steel/conv/params.h)
+build_kernel(dot)
 build_kernel(layer_norm)
 build_kernel(random)
 build_kernel(rms_norm)
 build_kernel(rope)
 build_kernel(scaled_dot_product_attention sdpa_vector.h)
+build_kernel(gated_delta_update gated_delta_update.h)
 if(MLX_METAL_VERSION GREATER_EQUAL 320)
   build_kernel(fence)
 endif()
@@ -140,6 +143,7 @@ if(NOT MLX_METAL_JIT)
   build_kernel(scan scan.h)
   build_kernel(softmax softmax.h)
   build_kernel(logsumexp logsumexp.h)
+  build_kernel(searchsorted searchsorted.h sort.h)
   build_kernel(sort sort.h)
   build_kernel(ternary ternary.h ternary_ops.h)
   build_kernel(unary unary.h unary_ops.h)
@@ -166,6 +170,8 @@ if(NOT MLX_METAL_JIT)
                  ${STEEL_NAX_HEADERS})
 
     build_kernel(quantized_nax quantized_nax.h ${STEEL_NAX_HEADERS})
+    build_kernel(gated_delta_update_nax gated_delta_update_nax.h
+                 ${STEEL_NAX_HEADERS})
     build_kernel(fp_quantized_nax fp4.h fp8.h fp_quantized_nax.h
                  ${STEEL_NAX_HEADERS})
 
@@ -173,6 +179,11 @@ if(NOT MLX_METAL_JIT)
                  ${STEEL_NAX_ATTN_HEADERS})
 
   else()
+    message(
+      WARNING "NAX kernels require Metal 4, macOS SDK >= 26.2, and "
+              "MACOSX_DEPLOYMENT_TARGET >= 26.2 (SDK ${MACOS_SDK_VERSION}, "
+              "CMAKE_OSX_DEPLOYMENT_TARGET=${CMAKE_OSX_DEPLOYMENT_TARGET}). "
+              "Building without NAX kernels.")
     target_compile_definitions(mlx PRIVATE MLX_METAL_NO_NAX)
   endif()
 
