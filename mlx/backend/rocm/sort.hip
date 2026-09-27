@@ -454,7 +454,7 @@ void gpu_sort(const Stream& s, array in, array& out_, int axis, bool argsort) {
 
             // Query temp storage size (same for all rows with same N).
             size_t temp_bytes = 0;
-            rocprim::radix_sort_pairs(
+            (void)rocprim::radix_sort_pairs(
                 nullptr, temp_bytes,
                 vals_tmp, vals_sorted,
                 indices_in, indices_out,
@@ -487,7 +487,7 @@ void gpu_sort(const Stream& s, array in, array& out_, int axis, bool argsort) {
                     0, hip_stream, indices_in, N);
               }
 
-              rocprim::radix_sort_pairs(
+              (void)rocprim::radix_sort_pairs(
                   temp_storage, temp_bytes,
                   vals_tmp, vals_sorted,
                   indices_in, indices_out,
@@ -512,7 +512,7 @@ void gpu_sort(const Stream& s, array in, array& out_, int axis, bool argsort) {
             CHECK_HIP_ERROR(hipMalloc(&vals_out_buf, N * sizeof(ValT)));
 
             size_t temp_bytes = 0;
-            rocprim::radix_sort_keys(
+            (void)rocprim::radix_sort_keys(
                 nullptr, temp_bytes,
                 vals_in, vals_out_buf,
                 N, 0, sizeof(ValT) * 8, hip_stream);
@@ -526,7 +526,7 @@ void gpu_sort(const Stream& s, array in, array& out_, int axis, bool argsort) {
               CHECK_HIP_ERROR(hipMemcpyAsync(vals_in, in_row,
                   N * sizeof(ValT), hipMemcpyDeviceToDevice, hip_stream));
 
-              rocprim::radix_sort_keys(
+              (void)rocprim::radix_sort_keys(
                   temp_storage, temp_bytes,
                   vals_in, vals_out_buf,
                   N, 0, sizeof(ValT) * 8, hip_stream);

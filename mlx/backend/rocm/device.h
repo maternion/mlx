@@ -462,17 +462,16 @@ void CommandEncoder::launch_kernel(F&& func) {
         hipError_t ee = hipStreamEndCapture(hstream, &child);
         if (ee == hipSuccess && child) {
           size_t nn = 0;
-          hipGraphGetNodes(child, nullptr, &nn);
+          (void)hipGraphGetNodes(child, nullptr, &nn);
           if (nn > 0) {
             add_child_graph_node(child, "lib");
-            hipGraphDestroy(child);
+            (void)hipGraphDestroy(child);
             return;
           }
-          hipGraphDestroy(child);
-        } else if (child)
-          hipGraphDestroy(child);
-        if (child)
-          hipGraphDestroy(child);
+          (void)hipGraphDestroy(child);
+        } else if (child) {
+          (void)hipGraphDestroy(child);
+        }
         (void)hipGetLastError();
       } else {
         if (std::getenv("MLX_GRAPH_SPLIT_LOG"))

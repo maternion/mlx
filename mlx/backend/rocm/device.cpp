@@ -429,12 +429,12 @@ CommandEncoder::~CommandEncoder() {
     for (auto& slot : pool) {
       hipGraphExecDestroy(slot.exec);
       if (slot.source_graph) {
-        hipGraphDestroy(slot.source_graph);
+        (void)hipGraphDestroy(slot.source_graph);
       }
     }
   }
   if (build_graph_) {
-    hipGraphDestroy(build_graph_);
+    (void)hipGraphDestroy(build_graph_);
     build_graph_ = nullptr;
   }
 }
@@ -634,15 +634,15 @@ void CommandEncoder::add_kernel_node_kp(const hipKernelNodeParams& kp) {
         hipError_t ee = hipStreamEndCapture(stream_, &child);
         if (ee == hipSuccess && child) {
           size_t nn = 0;
-          hipGraphGetNodes(child, nullptr, &nn);
+          (void)hipGraphGetNodes(child, nullptr, &nn);
           if (nn > 0) {
             add_child_graph_node(child, key);
-            hipGraphDestroy(child);
+            (void)hipGraphDestroy(child);
             return;
           }
-          hipGraphDestroy(child);
+          (void)hipGraphDestroy(child);
         } else if (child) {
-          hipGraphDestroy(child);
+          (void)hipGraphDestroy(child);
         }
         (void)hipGetLastError();
       }
@@ -710,10 +710,10 @@ void CommandEncoder::add_child_graph_node(
   // embedding the child as-is only if it contains non-kernel nodes (none
   // observed in practice).
   size_t n = 0;
-  hipGraphGetNodes(child, nullptr, &n);
+  (void)hipGraphGetNodes(child, nullptr, &n);
   std::vector<hipGraphNode_t> cnodes(n);
   if (n) {
-    hipGraphGetNodes(child, cnodes.data(), &n);
+    (void)hipGraphGetNodes(child, cnodes.data(), &n);
   }
   // Topologically order the child's kernels (Kahn) so chain-edge serialization
   // never places a consumer before its producer.
@@ -835,14 +835,14 @@ bool CommandEncoder::decode_capture_end_record(int slot) {
   g_decode_capturing.store(false, std::memory_order_relaxed);
   if (ee != hipSuccess || !g) {
     if (g)
-      hipGraphDestroy(g);
+      (void)hipGraphDestroy(g);
     (void)hipGetLastError();
     if (dbg)
       fprintf(stderr, "[cap] EndCapture failed: %s\n", hipGetErrorString(ee));
     return false;
   }
   size_t nn = 0;
-  hipGraphGetNodes(g, nullptr, &nn);
+  (void)hipGraphGetNodes(g, nullptr, &nn);
   if (dbg) {
     fprintf(stderr, "[cap] captured %zu nodes\n", nn);
     std::vector<hipGraphNode_t> nodes(nn);
@@ -884,7 +884,7 @@ bool CommandEncoder::decode_capture_end_record(int slot) {
     }
   }
   if (nn == 0) {
-    hipGraphDestroy(g);
+    (void)hipGraphDestroy(g);
     return false;
   }
   hipGraphExec_t exec = nullptr;
@@ -892,14 +892,14 @@ bool CommandEncoder::decode_capture_end_record(int slot) {
   if (ie != hipSuccess) {
     if (dbg)
       fprintf(stderr, "[cap] Instantiate failed: %s\n", hipGetErrorString(ie));
-    hipGraphDestroy(g);
+    (void)hipGraphDestroy(g);
     (void)hipGetLastError();
     return false;
   }
   if (decode_cap_exec_[slot])
     hipGraphExecDestroy(decode_cap_exec_[slot]);
   if (decode_cap_graph_[slot])
-    hipGraphDestroy(decode_cap_graph_[slot]);
+    (void)hipGraphDestroy(decode_cap_graph_[slot]);
   decode_cap_graph_[slot] = g;
   decode_cap_exec_[slot] = exec;
   // Stream capture records WITHOUT executing — run the exec once to actually
@@ -926,7 +926,7 @@ void CommandEncoder::decode_capture_destroy() {
       decode_cap_exec_[s] = nullptr;
     }
     if (decode_cap_graph_[s]) {
-      hipGraphDestroy(decode_cap_graph_[s]);
+      (void)hipGraphDestroy(decode_cap_graph_[s]);
       decode_cap_graph_[s] = nullptr;
     }
   }
@@ -994,7 +994,7 @@ void CommandEncoder::commit() {
           build_graph_adopted = true; // exec now bound to build_graph_'s nodes
           slot.src_nodes = build_nodes_;
           if (slot.source_graph)
-            hipGraphDestroy(slot.source_graph);
+            (void)hipGraphDestroy(slot.source_graph);
           slot.source_graph = build_graph_;
         } else {
           (void)hipGetLastError();
@@ -1010,7 +1010,7 @@ void CommandEncoder::commit() {
         graph_exec = slot.exec;
         slot.src_nodes = build_nodes_;
         if (slot.source_graph)
-          hipGraphDestroy(slot.source_graph);
+          (void)hipGraphDestroy(slot.source_graph);
         slot.source_graph = build_graph_;
         build_graph_adopted = true;
       }
@@ -1115,7 +1115,7 @@ void CommandEncoder::commit() {
     used_slot->packs = std::move(graph_node_args_);
     graph_node_args_.clear();
     if (!build_graph_adopted) {
-      hipGraphDestroy(build_graph_);
+      (void)hipGraphDestroy(build_graph_);
     }
     CHECK_HIP_ERROR(hipGraphCreate(&build_graph_, 0));
   }

@@ -185,20 +185,6 @@ endif()
 set(HIP_OBJ_DIR "${CMAKE_CURRENT_BINARY_DIR}/hip_objs")
 file(MAKE_DIRECTORY ${HIP_OBJ_DIR})
 
-# Detect CPU count for parallel HIP offload compilation Use half of available
-# CPUs for parallel HIP offload compilation per file (Ninja already parallelizes
-# across files, so this avoids oversubscription)
-include(ProcessorCount)
-ProcessorCount(NPROC)
-if(NPROC EQUAL 0)
-  set(NPROC 4)
-else()
-  math(EXPR NPROC "${NPROC} / 2")
-  if(NPROC LESS 2)
-    set(NPROC 2)
-  endif()
-endif()
-
 # Compile each HIP file to object file using custom commands Use -fno-gpu-rdc to
 # avoid needing device link step
 set(HIP_OBJECTS "")
@@ -220,7 +206,7 @@ foreach(hip_src ${HIP_SOURCES})
     OUTPUT ${hip_obj}
     COMMAND
       ${CMAKE_HIP_COMPILER} -c ${hip_src} -o ${hip_obj} -fPIC -DMLX_USE_ROCM
-      ${HIP_ARCH_FLAGS} ${HIP_INCLUDE_FLAGS} -std=c++17 -parallel-jobs=${NPROC}
+      ${HIP_ARCH_FLAGS} ${HIP_INCLUDE_FLAGS} -std=c++20
     DEPENDS ${hip_src}
     COMMENT "Compiling HIP source ${hip_src}"
     VERBATIM)
