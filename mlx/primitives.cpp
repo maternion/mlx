@@ -6316,18 +6316,12 @@ bool Hadamard::is_equivalent(const Primitive& other) const {
   return scale_ == h_other.scale_;
 }
 
-// Stubs for primitives whose eval_gpu/eval_cpu are declared but not
-// implemented in the ROCm backend. The fallback path handles these.
-void GatherQQMM::eval_cpu(const std::vector<array>&, array&) {
-  throw std::runtime_error("GatherQQMM::eval_cpu not implemented");
-}
+// Stubs for primitives whose eval_gpu is declared but not implemented in the
+// ROCm backend (real eval_cpu comes from backend/cpu).
 void GatherQQMM::eval_gpu(const std::vector<array>&, array&) {
   throw std::runtime_error("GatherQQMM::eval_gpu not implemented");
 }
 
-void SearchSorted::eval_cpu(const std::vector<array>&, array&) {
-  throw std::runtime_error("SearchSorted::eval_cpu not implemented");
-}
 void SearchSorted::eval_gpu(const std::vector<array>&, array&) {
   throw std::runtime_error("SearchSorted::eval_gpu not implemented");
 }

@@ -910,11 +910,14 @@ void Compiled::eval_gpu(
   });
 
   // Collapse contiguous dims to route to a faster kernel if possible.
-  auto [contiguous, shape, strides_vec] =
+  // Collapse contiguous dims to route to a faster kernel if possible. Also
+  // handle all broadcasting.
+  auto [contiguous, negative_strides, shape, strides_vec] =
       compiled_collapse_contiguous_dims(inputs, outputs[0], is_constant_);
 
-  // Whether to use large index.
-  bool large = compiled_use_large_index(inputs, outputs, contiguous);
+  // Whether to use large index (also true for negative strides).
+  bool large =
+      negative_strides || compiled_use_large_index(inputs, outputs, contiguous);
 
   rocm::KernelArgs args;
   // Put inputs.

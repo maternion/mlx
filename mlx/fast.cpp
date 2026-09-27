@@ -1211,17 +1211,4 @@ bool CrossEntropy::use_fallback(Stream /*s*/) {
   return true; // always use fallback on ROCm
 }
 
-// Stub metal_kernel — not available on ROCm backend.
-CustomKernelFunction metal_kernel(
-    const std::string&,
-    const std::vector<std::string>&,
-    const std::vector<std::string>&,
-    const std::string&,
-    const std::string&,
-    bool,
-    bool,
-    const CompileOptions&) {
-  throw std::runtime_error("metal_kernel not available on ROCm backend");
-}
-
 } // namespace mlx::core::fast
