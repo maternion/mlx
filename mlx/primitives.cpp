@@ -6316,14 +6316,10 @@ bool Hadamard::is_equivalent(const Primitive& other) const {
   return scale_ == h_other.scale_;
 }
 
-// Stubs for primitives whose eval_gpu is declared but not implemented in the
+// Stub for a primitive whose eval_gpu is declared but not implemented in the
 // ROCm backend (real eval_cpu comes from backend/cpu).
 void GatherQQMM::eval_gpu(const std::vector<array>&, array&) {
   throw std::runtime_error("GatherQQMM::eval_gpu not implemented");
-}
-
-void SearchSorted::eval_gpu(const std::vector<array>&, array&) {
-  throw std::runtime_error("SearchSorted::eval_gpu not implemented");
 }
 
 } // namespace mlx::core

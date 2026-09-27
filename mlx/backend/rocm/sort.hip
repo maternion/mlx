@@ -390,6 +390,40 @@ __global__ void iota_kernel(uint32_t* out, int n) {
   }
 }
 
+template <typename T, bool Right>
+__device__ __forceinline__ uint32_t
+searchsorted_impl(const T* a, T v, uint32_t n, int64_t a_stride) {
+  LessThan<T> lt;
+  uint32_t lo = 0;
+  uint32_t hi = n;
+  while (lo < hi) {
+    uint32_t mid = lo + (hi - lo) / 2;
+    T m = a[static_cast<int64_t>(mid) * a_stride];
+    bool below = Right ? !lt(v, m) : lt(m, v);
+    if (below) {
+      lo = mid + 1;
+    } else {
+      hi = mid;
+    }
+  }
+  return lo;
+}
+
+template <typename T, bool Right>
+__global__ void searchsorted(
+    const T* a,
+    const T* v,
+    uint32_t* out,
+    int64_t size,
+    uint32_t n,
+    int64_t a_stride) {
+  int64_t index = blockIdx.x * static_cast<int64_t>(blockDim.x) + threadIdx.x;
+  if (index >= size) {
+    return;
+  }
+  out[index] = searchsorted_impl<T, Right>(a, v[index], n, a_stride);
+}
+
 } // namespace rocm
 
 namespace {
@@ -652,6 +686,59 @@ void ArgPartition::eval_gpu(const std::vector<array>& inputs, array& out) {
 
 void Partition::eval_gpu(const std::vector<array>& inputs, array& out) {
   gpu_sort(stream(), inputs[0], out, axis_, false);
+}
+
+void SearchSorted::eval_gpu(const std::vector<array>& inputs, array& out) {
+  assert(inputs.size() == 2);
+  auto& s = stream();
+  auto& a = inputs[0];
+  auto v = inputs[1];
+
+  auto& encoder = rocm::get_command_encoder(s);
+  out.set_data(mlx::core::rocm::malloc_async(out.nbytes(), encoder));
+  if (out.size() == 0) {
+    return;
+  }
+
+  if (!v.flags().row_contiguous) {
+    v = contiguous_copy_gpu(v, s);
+    encoder.add_temporary(v);
+  }
+
+  encoder.set_input_array(a);
+  encoder.set_input_array(v);
+  encoder.set_output_array(out);
+
+  const int64_t a_stride = a.strides()[0]; // sequence is 1D
+  const int64_t size = out.size();
+  const int block = 256;
+  const uint32_t blocks = static_cast<uint32_t>((size + block - 1) / block);
+
+  dispatch_all_types(a.dtype(), [&](auto type_tag) {
+    using CTYPE = MLX_GET_TYPE(type_tag);
+    if constexpr (!std::is_same_v<CTYPE, complex64_t>) {
+      using T = hip_type_t<CTYPE>;
+      auto launch = [&](auto right_tag) {
+        constexpr bool RIGHT = decltype(right_tag)::value;
+        encoder.add_kernel_node(
+            &rocm::searchsorted<T, RIGHT>,
+            dim3(blocks, 1, 1),
+            dim3(block, 1, 1),
+            0,
+            gpu_ptr<T>(a),
+            gpu_ptr<T>(v),
+            gpu_ptr<uint32_t>(out),
+            size,
+            static_cast<uint32_t>(a.size()),
+            a_stride);
+      };
+      if (right_) {
+        launch(std::true_type{});
+      } else {
+        launch(std::false_type{});
+      }
+    }
+  });
 }
 
 } // namespace mlx::core
