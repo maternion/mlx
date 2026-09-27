@@ -307,6 +307,8 @@ namespace {
 struct EventImpl {
   std::unique_ptr<rocm::CopyableHipEvent> hip;
   std::unique_ptr<rocm::AtomicEvent> atomic;
+  // Error slot for the upstream Event::set_error/check_error path.
+  std::atomic<Error*> error{nullptr};
   // Set when the event is "signaled" purely on the host because it was created
   // during HIP graph capture: recording a real completion event onto the
   // captured stream would bake it into the graph (never fires under capture),
@@ -396,6 +398,10 @@ bool Event::is_signaled() const {
   } else {
     return event->atomic->is_signaled(value());
   }
+}
+
+std::atomic<Error*>& Event::error() {
+  return static_cast<EventImpl*>(event_.get())->error;
 }
 
 } // namespace mlx::core

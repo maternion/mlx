@@ -160,7 +160,7 @@ struct LogAddExp {
       // LogAddExp doesn't make sense for integers, but handle it gracefully
       return x > y ? x : y;
     } else if constexpr (is_complex_v<T>) {
-      if (isnan(x.x) || isnan(x.y) || isnan(y.x) || isnan(y.y)) {
+      if (!(x.x == x.x) || !(x.y == x.y) || !(y.x == y.x) || !(y.y == y.y)) {
         return {
             numeric_limits<float>::quiet_NaN(),
             numeric_limits<float>::quiet_NaN()};
@@ -181,7 +181,7 @@ struct LogAddExp {
     } else if constexpr (std::is_same_v<T, hip_bfloat16>) {
       float fx = static_cast<float>(x);
       float fy = static_cast<float>(y);
-      if (isnan(fx) || isnan(fy)) {
+      if (__isnanf(fx) || __isnanf(fy)) {
         return hip_bfloat16(numeric_limits<float>::quiet_NaN());
       }
       float maxval = fmaxf(fx, fy);
@@ -194,7 +194,7 @@ struct LogAddExp {
     } else if constexpr (std::is_same_v<T, __half>) {
       float fx = __half2float(x);
       float fy = __half2float(y);
-      if (isnan(fx) || isnan(fy)) {
+      if (__isnanf(fx) || __isnanf(fy)) {
         return __float2half(numeric_limits<float>::quiet_NaN());
       }
       float maxval = fmaxf(fx, fy);
@@ -205,7 +205,7 @@ struct LogAddExp {
           : maxval + log1pf(expf(minval - maxval));
       return __float2half(result);
     } else {
-      if (isnan(x) || isnan(y)) {
+      if (__isnanf(x) || __isnanf(y)) {
         return numeric_limits<T>::quiet_NaN();
       }
       T maxval = fmaxf(x, y);
