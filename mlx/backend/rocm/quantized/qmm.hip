@@ -2273,7 +2273,7 @@ __global__ void __launch_bounds__(256) qmv_fp8_gemv_kernel(
       wf[15] = fp8_e4m3_to_float((packed.w >> 24) & 0xFF);
 
       const int kbase = v * VEC;
-#pragma unroll
+#pragma unroll 16
       for (int r = 0; r < ROWS; ++r) {
         if (r >= rows) {
           break;
@@ -2289,7 +2289,7 @@ __global__ void __launch_bounds__(256) qmv_fp8_gemv_kernel(
       }
     }
 
-#pragma unroll
+#pragma unroll 16
     for (int r = 0; r < ROWS; ++r) {
       if (r >= rows) {
         break;
