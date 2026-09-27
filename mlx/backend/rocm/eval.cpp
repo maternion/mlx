@@ -25,8 +25,7 @@ void init() {
   if (d.type == mlx::core::Device::gpu) {
     (void)hipSetDevice(d.index);
   }
-  hipFree(nullptr);
-}
+  (void)hipFree(nullptr);}
 
 void new_stream(Stream s) {
   // Bind the stream's device FIRST (creates/selects its Device + context), then

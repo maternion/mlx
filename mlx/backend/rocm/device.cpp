@@ -80,7 +80,7 @@ Device::Device(int device) : device_(device) {
     if (hipGetDeviceProperties(&p, device_) == hipSuccess) {
       fprintf(
           stderr,
-          "[mlx-rocm] bound HIP device %d: %s (%s) cus=%d warp=%d lds=%dKB\n",
+          "[mlx-rocm] bound HIP device %d: %s (%s) cus=%d warp=%d lds=%zuKB\n",
           device_,
           p.gcnArchName,
           p.name,
@@ -136,8 +136,7 @@ rocblas_handle Device::get_rocblas_handle() {
 
     // Check if the GPU architecture is supported by rocBLAS
     hipDeviceProp_t props;
-    hipGetDeviceProperties(&props, device_);
-    std::string arch_name = props.gcnArchName;
+    (void)hipGetDeviceProperties(&props, device_);    std::string arch_name = props.gcnArchName;
 
     // List of architectures supported by rocBLAS (based on TensileLibrary
     // files). These are the architectures that have TensileLibrary_lazy_*.dat.
@@ -234,14 +233,11 @@ bool Device::is_rocblas_bf16_available() {
       return false;
     err = hipMalloc(&b_ptr, 4 * 4 * 2);
     if (err != hipSuccess) {
-      hipFree(a_ptr);
-      return false;
+      (void)hipFree(a_ptr);      return false;
     }
     err = hipMalloc(&c_ptr, 4 * 4 * 2);
     if (err != hipSuccess) {
-      hipFree(a_ptr);
-      hipFree(b_ptr);
-      return false;
+      (void)hipFree(a_ptr);      (void)hipFree(b_ptr);      return false;
     }
 
     (void)hipMemset(a_ptr, 0, 4 * 4 * 2);
@@ -280,10 +276,7 @@ bool Device::is_rocblas_bf16_available() {
     // Clear any lingering error
     (void)hipGetLastError();
 
-    hipFree(a_ptr);
-    hipFree(b_ptr);
-    hipFree(c_ptr);
-
+    (void)hipFree(a_ptr);    (void)hipFree(b_ptr);    (void)hipFree(c_ptr);
     if (status == rocblas_status_success && sync_err == hipSuccess) {
       rocblas_bf16_available_ = true;
     } else {
@@ -427,8 +420,7 @@ CommandEncoder::CommandEncoder(Device& d)
 CommandEncoder::~CommandEncoder() {
   for (auto& [key, pool] : exec_pool_) {
     for (auto& slot : pool) {
-      hipGraphExecDestroy(slot.exec);
-      if (slot.source_graph) {
+      (void)hipGraphExecDestroy(slot.exec);      if (slot.source_graph) {
         (void)hipGraphDestroy(slot.source_graph);
       }
     }
@@ -718,11 +710,9 @@ void CommandEncoder::add_child_graph_node(
   // Topologically order the child's kernels (Kahn) so chain-edge serialization
   // never places a consumer before its producer.
   size_t ne = 0;
-  hipGraphGetEdges(child, nullptr, nullptr, &ne);
-  std::vector<hipGraphNode_t> cfrom(ne), cto(ne);
+  (void)hipGraphGetEdges(child, nullptr, nullptr, &ne);  std::vector<hipGraphNode_t> cfrom(ne), cto(ne);
   if (ne) {
-    hipGraphGetEdges(child, cfrom.data(), cto.data(), &ne);
-  }
+    (void)hipGraphGetEdges(child, cfrom.data(), cto.data(), &ne);  }
   bool all_kernels = n > 0;
   for (size_t i = 0; i < n; i++) {
     hipGraphNodeType t;
@@ -897,8 +887,7 @@ bool CommandEncoder::decode_capture_end_record(int slot) {
     return false;
   }
   if (decode_cap_exec_[slot])
-    hipGraphExecDestroy(decode_cap_exec_[slot]);
-  if (decode_cap_graph_[slot])
+    (void)hipGraphExecDestroy(decode_cap_exec_[slot]);  if (decode_cap_graph_[slot])
     (void)hipGraphDestroy(decode_cap_graph_[slot]);
   decode_cap_graph_[slot] = g;
   decode_cap_exec_[slot] = exec;
@@ -922,8 +911,7 @@ bool CommandEncoder::decode_capture_replay(int slot) {
 void CommandEncoder::decode_capture_destroy() {
   for (int s = 0; s < 2; ++s) {
     if (decode_cap_exec_[s]) {
-      hipGraphExecDestroy(decode_cap_exec_[s]);
-      decode_cap_exec_[s] = nullptr;
+      (void)hipGraphExecDestroy(decode_cap_exec_[s]);      decode_cap_exec_[s] = nullptr;
     }
     if (decode_cap_graph_[s]) {
       (void)hipGraphDestroy(decode_cap_graph_[s]);
@@ -1004,8 +992,7 @@ void CommandEncoder::commit() {
         graph_exec = slot.exec;
       } else {
         // Reinstantiate into this slot from the new build graph.
-        hipGraphExecDestroy(slot.exec);
-        CHECK_HIP_ERROR(
+        (void)hipGraphExecDestroy(slot.exec);        CHECK_HIP_ERROR(
             hipGraphInstantiate(&slot.exec, build_graph_, nullptr, nullptr, 0));
         graph_exec = slot.exec;
         slot.src_nodes = build_nodes_;
@@ -1194,9 +1181,7 @@ Device& device(mlx::core::Device device) {
     // every device would create a context/queue on the other GPU too; on a
     // multi-GPU host that cross-device coexistence is what wedges the discrete
     // GPU's queue over a TB5 link, so touch only this device.
-    hipSetDevice(device.index);
-    hipSetDeviceFlags(hipDeviceScheduleBlockingSync);
-    it = devices.try_emplace(device.index, device.index).first;
+    (void)hipSetDevice(device.index);    (void)hipSetDeviceFlags(hipDeviceScheduleBlockingSync);    it = devices.try_emplace(device.index, device.index).first;
   }
   return it->second;
 }
