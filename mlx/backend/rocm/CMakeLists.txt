@@ -202,10 +202,17 @@ foreach(hip_src ${HIP_SOURCES})
     set(hip_obj "${HIP_OBJ_DIR}/${hip_name}.o")
   endif()
 
+  # Use ccache when available; the custom command bypasses CMake's
+  # CMAKE_<LANG>_COMPILER_LAUNCHER so we prepend it manually.
+  find_program(CCACHE_PROGRAM ccache)
+  set(_hip_launcher "")
+  if(CCACHE_PROGRAM)
+    set(_hip_launcher "${CCACHE_PROGRAM}")
+  endif()
   add_custom_command(
     OUTPUT ${hip_obj}
     COMMAND
-      ${CMAKE_HIP_COMPILER} -c ${hip_src} -o ${hip_obj} -fPIC -DMLX_USE_ROCM
+      ${_hip_launcher} ${CMAKE_HIP_COMPILER} -c ${hip_src} -o ${hip_obj} -fPIC -DMLX_USE_ROCM
       ${HIP_ARCH_FLAGS} ${HIP_INCLUDE_FLAGS} -std=c++20
     DEPENDS ${hip_src}
     COMMENT "Compiling HIP source ${hip_src}"
