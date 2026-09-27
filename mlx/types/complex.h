@@ -117,6 +117,9 @@ constexpr bool is_complex<T, std::void_t<decltype(std::declval<T>().real())>> = 
 // clang-format on
 
 template <typename T>
+#ifdef __HIPCC__
+__host__ __device__
+#endif
 inline bool isnan(T v) {
   if constexpr (is_complex<T>) {
     return std::isnan(std::real(v)) || std::isnan(std::imag(v));
