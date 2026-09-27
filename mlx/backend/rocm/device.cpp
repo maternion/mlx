@@ -3,6 +3,7 @@
 #include "mlx/backend/rocm/device.h"
 #include <algorithm>
 #include <atomic>
+#include "mlx/backend/rocm/allocator.h"
 #include "mlx/backend/rocm/utils.h"
 #include "mlx/backend/rocm/worker.h"
 #include "mlx/utils.h"
@@ -1210,6 +1211,10 @@ CommandEncoder& get_command_encoder(Stream s) {
   // hidden.
   auto& d = device(s.device);
   d.make_current();
+  // Flush any dirty host shadows before GPU kernels read device buffers.
+  // CPU-side writes (array::init, array::data<T>) go to host shadow; GPU
+  // kernels read from VRAM. Without this flush, kernels see stale data.
+  rocm::allocator().flush_all_dirty_shadows();
   return d.get_command_encoder(s);
 }
 

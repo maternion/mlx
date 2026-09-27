@@ -13,6 +13,7 @@
 
 #include <deque>
 #include <mutex>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -108,6 +109,10 @@ class RocmAllocator : public allocator::Allocator {
 
   void ensure_host_shadow(RocmBuffer& buf);
   void flush_host_shadow(RocmBuffer& buf);
+  // Flush all host shadows that have been written from the CPU back to VRAM.
+  // Called before GPU kernel execution to ensure device buffers are current.
+  void flush_all_dirty_shadows();
+  void mark_dirty_shadow(RocmBuffer* buf);
 
   bool decode_arena_begin(size_t capacity, int device, void* stream);
   void decode_arena_reset();
@@ -175,6 +180,8 @@ class RocmAllocator : public allocator::Allocator {
   std::vector<void*> free_streams_;
   std::vector<void*> mem_pools_;
   SmallSizePool scalar_pool_;
+  // Track buffers with dirty host shadows (CPU wrote, needs flush to VRAM).
+  std::unordered_set<RocmBuffer*> dirty_shadows_;
   DecodeArena decode_arena_;
 };
 

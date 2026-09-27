@@ -6,6 +6,7 @@
 #include <variant>
 
 #include "mlx/api.h"
+#include "mlx/backend/common/metal_kernel.h"
 #include "mlx/utils.h"
 
 namespace mlx::core::fast {
@@ -22,6 +23,10 @@ MLX_API array layer_norm(
     const std::optional<array>& bias,
     float eps,
     StreamOrDevice s = {});
+
+/** Fused cross entropy with class indices as targets. */
+MLX_API array
+cross_entropy(const array& logits, const array& targets, StreamOrDevice s = {});
 
 MLX_API array rope(
     const array& x,
@@ -52,6 +57,20 @@ MLX_API array scaled_dot_product_attention(
     const std::string& mask_mode = "",
     std::optional<array> mask_arr = {},
     const std::optional<array>& sinks = {},
+    bool force_fused = false,
+    StreamOrDevice s = {});
+
+// Chunked gated-delta update (prefill path). Upstream MLX implements this as
+// a fused Metal kernel; the ROCm fork declares it so mlxc's C binding links,
+// but it is never called here (the Go side gates it behind MetalIsAvailable).
+MLX_API std::vector<array> gated_delta_update(
+    const array& queries,
+    const array& keys,
+    const array& values,
+    const array& gates,
+    const array& beta_,
+    const std::optional<array>& initial_state = std::nullopt,
+    const std::optional<array>& mask = std::nullopt,
     StreamOrDevice s = {});
 
 using TemplateArg = std::variant<int, bool, Dtype>;
@@ -75,7 +94,8 @@ MLX_API CustomKernelFunction metal_kernel(
     const std::string& source,
     const std::string& header = "",
     bool ensure_row_contiguous = true,
-    bool atomic_outputs = false);
+    bool atomic_outputs = false,
+    const CompileOptions& compile_options = {});
 
 MLX_API CustomKernelFunction cuda_kernel(
     const std::string& name,
@@ -86,6 +106,9 @@ MLX_API CustomKernelFunction cuda_kernel(
     bool ensure_row_contiguous = true,
     int shared_memory = 0);
 
+// ROCm (hipRTC) custom kernel. CUDA-style kernel bodies (threadIdx, blockIdx,
+// __global__ __shared__ etc.) compile unchanged under HIP; on ROCm-only builds
+// cuda_kernel() forwards here.
 MLX_API CustomKernelFunction hip_kernel(
     const std::string& name,
     const std::vector<std::string>& input_names,
@@ -94,8 +117,6 @@ MLX_API CustomKernelFunction hip_kernel(
     const std::string& header = "",
     bool ensure_row_contiguous = true,
     int shared_memory = 0,
-    // Output index -> input index to alias (output reuses the input's buffer,
-    // in place). Used for recurrent-state kernels under HIP-graph capture.
     std::vector<std::pair<int, int>> output_input_aliases = {});
 
 MLX_API std::vector<array> precompiled_cuda_kernel(

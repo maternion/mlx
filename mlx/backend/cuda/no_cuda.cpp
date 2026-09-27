@@ -3,6 +3,10 @@
 #include "mlx/backend/cuda/cuda.h"
 #include "mlx/fast.h"
 
+#ifdef MLX_USE_ROCM
+#include "mlx/backend/rocm/rocm.h"
+#endif
+
 namespace mlx::core {
 
 namespace cu {
@@ -16,13 +20,29 @@ bool is_available() {
 namespace fast {
 
 CustomKernelFunction cuda_kernel(
-    const std::string&,
-    const std::vector<std::string>&,
-    const std::vector<std::string>&,
-    const std::string&,
-    const std::string&,
-    bool,
-    int) {
+    const std::string& name,
+    const std::vector<std::string>& input_names,
+    const std::vector<std::string>& output_names,
+    const std::string& source,
+    const std::string& header,
+    bool ensure_row_contiguous,
+    int shared_memory) {
+#ifdef MLX_USE_ROCM
+  if (rocm::is_available()) {
+    // No CUDA, but the ROCm custom-kernel path (hipRTC under
+    // backend/rocm/custom_kernel.cpp) compiles the same CUDA-style kernel
+    // bodies. Route instead of failing so callers' "cuda" kernels run.
+    return hip_kernel(
+        name,
+        input_names,
+        output_names,
+        source,
+        header,
+        ensure_row_contiguous,
+        shared_memory,
+        {});
+  }
+#endif
   throw std::runtime_error("[cuda_kernel] No CUDA back-end.");
 }
 

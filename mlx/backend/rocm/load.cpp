@@ -28,10 +28,6 @@ void swap_endianness(uint8_t* data_bytes, size_t N) {
   }
 }
 
-void hip_host_free_callback(void* ptr) {
-  (void)hipHostFree(ptr);
-}
-
 } // namespace
 
 namespace mlx::core {
@@ -89,7 +85,15 @@ void Load::eval_gpu(const std::vector<array>& inputs, array& out) {
       nbytes,
       hipMemcpyHostToDevice,
       encoder.stream());
-  (void)hipLaunchHostFunc(encoder.stream(), hip_host_free_callback, out_ptr);
+  // Do NOT free the staging buffer via hipLaunchHostFunc: calling a HIP
+  // runtime API (hipHostFree) from inside a stream host function deadlocks the
+  // stream executor on ROCm/gfx12xx (the free waits on progress that can only
+  // happen after the host function itself returns). The H2D copy, the event
+  // record after it, and the eval's completion wait then never retire. Free on
+  // the HIP-initialized worker thread instead: it runs once the stream has
+  // drained past this copy, so the pinned source stays alive long enough and
+  // the free is outside the executor.
+  encoder.add_completed_handler([out_ptr]() { (void)hipHostFree(out_ptr); });
 }
 
 } // namespace mlx::core

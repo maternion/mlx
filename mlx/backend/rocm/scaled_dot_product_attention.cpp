@@ -150,6 +150,7 @@ bool ScaledDotProductAttention::use_fallback(
     bool do_causal,
     bool /*is_training*/,
     bool output_logsumexp,
+    bool /*force_fused*/,
     Stream s) {
   // Vector + scalar flash reject output_logsumexp. WMMA flash can emit LSE and
   // must be counted here or MLX_SDPA_FLASH_VJP never attaches (frontend only

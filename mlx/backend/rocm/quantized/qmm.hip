@@ -2167,6 +2167,144 @@ __global__ void __launch_bounds__(1024) qmv_warp_shared_kernel(
   }
 }
 
+// ======================================================================
+// Fast fp8 (E4M3) GEMV / small-M GEMM for the non-affine path.
+//
+// The generic warp-shared kernel above pays for its flexibility
+// (chunked shared-x staging, syncthreads, half-idle lanes at
+// THREADS_PER_COL=16) and reaches only ~25-60 GB/s at decode shapes on a
+// 16-CU gfx1200. This kernel follows the AMD HIP perf guidelines: one
+// wave32 warp per output column, 128-bit (uint4) weight loads so the warp
+// reads fully-coalesced 512 B lines, weights reused across M rows in
+// register-chunked row groups, and scales decoded from uint8
+// (fp_scale_to_float) once per lane-iteration. fp mode has no bias.
+// Kill switch: MLX_ROCM_QMV_NO_FP8_GEMV=1.
+// ======================================================================
+// Load 16 activations (bf16/half/fp32), unpacked to floats. x offsets are
+// always multiples of 16 elements, so 16-byte vector loads are aligned.
+template <typename T>
+__device__ __forceinline__ void qmv_fp8_load16(const T* p, float* f) {
+  if constexpr (sizeof(T) == 2) {
+    const uint4 a = *reinterpret_cast<const uint4*>(p);
+    const uint4 b = *reinterpret_cast<const uint4*>(p + 8);
+    const uint32_t u[8] = {a.x, a.y, a.z, a.w, b.x, b.y, b.z, b.w};
+#pragma unroll
+    for (int i = 0; i < 8; ++i) {
+      union {
+        uint32_t u;
+        T t[2];
+      } cvt{u[i]};
+      f[2 * i] = static_cast<float>(cvt.t[0]);
+      f[2 * i + 1] = static_cast<float>(cvt.t[1]);
+    }
+  } else {
+    const float4 a = *reinterpret_cast<const float4*>(p);
+    const float4 b = *reinterpret_cast<const float4*>(p + 4);
+    const float4 c = *reinterpret_cast<const float4*>(p + 8);
+    const float4 d = *reinterpret_cast<const float4*>(p + 12);
+    f[0] = a.x; f[1] = a.y; f[2] = a.z; f[3] = a.w;
+    f[4] = b.x; f[5] = b.y; f[6] = b.z; f[7] = b.w;
+    f[8] = c.x; f[9] = c.y; f[10] = c.z; f[11] = c.w;
+    f[12] = d.x; f[13] = d.y; f[14] = d.z; f[15] = d.w;
+  }
+}
+
+template <typename T, int GROUP_SIZE>
+__global__ void __launch_bounds__(256) qmv_fp8_gemv_kernel(
+    const T* __restrict__ x,
+    const uint8_t* __restrict__ w,
+    const uint8_t* __restrict__ scales,
+    T* __restrict__ out,
+    int M,
+    int N,
+    int K) {
+  constexpr int VEC = 16; // 16 E4M3 bytes per uint4 load
+  constexpr int VPG = GROUP_SIZE / VEC; // uint4 vectors per quant group
+  static_assert(GROUP_SIZE % VEC == 0 && VPG >= 1);
+  // Row chunk sized to amortize each weight-row load+decode across many M
+  // rows on prefill (M up to the ubatch size). Guarded unrolled loops keep
+  // acc/wf/xf in registers.
+  constexpr int ROWS = 16;
+
+  const int lane = threadIdx.x; // 0..31
+  const int warp = threadIdx.y;
+  const int col = blockIdx.x * blockDim.y + warp;
+  if (col >= N) {
+    return;
+  }
+
+  const int nvec = K / VEC; // dispatch guarantees K % VEC == 0
+  const int num_groups = K / GROUP_SIZE;
+  const uint4* w_vec =
+      reinterpret_cast<const uint4*>(w + static_cast<size_t>(col) * K);
+  const uint8_t* s_row = scales + static_cast<size_t>(col) * num_groups;
+
+  for (int row0 = 0; row0 < M; row0 += ROWS) {
+    const int rows = min(ROWS, M - row0);
+    float acc[ROWS];
+#pragma unroll
+    for (int r = 0; r < ROWS; ++r) {
+      acc[r] = 0.0f;
+    }
+
+    // Lane covers vectors v = lane, lane+32, ... (consecutive lanes read
+    // consecutive 16 B vectors -> one coalesced 512 B line per warp step).
+    for (int v = lane; v < nvec; v += 32) {
+      const uint4 packed = w_vec[v];
+      const float scale =
+          fp_scale_to_float<GROUP_SIZE>(s_row[v / VPG]);
+
+      float wf[16];
+      wf[0] = fp8_e4m3_to_float(packed.x & 0xFF);
+      wf[1] = fp8_e4m3_to_float((packed.x >> 8) & 0xFF);
+      wf[2] = fp8_e4m3_to_float((packed.x >> 16) & 0xFF);
+      wf[3] = fp8_e4m3_to_float((packed.x >> 24) & 0xFF);
+      wf[4] = fp8_e4m3_to_float(packed.y & 0xFF);
+      wf[5] = fp8_e4m3_to_float((packed.y >> 8) & 0xFF);
+      wf[6] = fp8_e4m3_to_float((packed.y >> 16) & 0xFF);
+      wf[7] = fp8_e4m3_to_float((packed.y >> 24) & 0xFF);
+      wf[8] = fp8_e4m3_to_float(packed.z & 0xFF);
+      wf[9] = fp8_e4m3_to_float((packed.z >> 8) & 0xFF);
+      wf[10] = fp8_e4m3_to_float((packed.z >> 16) & 0xFF);
+      wf[11] = fp8_e4m3_to_float((packed.z >> 24) & 0xFF);
+      wf[12] = fp8_e4m3_to_float(packed.w & 0xFF);
+      wf[13] = fp8_e4m3_to_float((packed.w >> 8) & 0xFF);
+      wf[14] = fp8_e4m3_to_float((packed.w >> 16) & 0xFF);
+      wf[15] = fp8_e4m3_to_float((packed.w >> 24) & 0xFF);
+
+      const int kbase = v * VEC;
+#pragma unroll
+      for (int r = 0; r < ROWS; ++r) {
+        if (r >= rows) {
+          break;
+        }
+        float xf[16];
+        qmv_fp8_load16(x + static_cast<size_t>(row0 + r) * K + kbase, xf);
+        float part = 0.0f;
+#pragma unroll
+        for (int i = 0; i < 16; ++i) {
+          part = fmaf(xf[i], wf[i], part);
+        }
+        acc[r] += scale * part;
+      }
+    }
+
+#pragma unroll
+    for (int r = 0; r < ROWS; ++r) {
+      if (r >= rows) {
+        break;
+      }
+      float a = acc[r];
+      for (int off = 16; off > 0; off >>= 1) {
+        a += __shfl_down(a, off);
+      }
+      if (lane == 0) {
+        out[static_cast<size_t>(row0 + r) * N + col] = static_cast<T>(a);
+      }
+    }
+  }
+}
+
 template <
     typename T,
     typename ScaleT,
@@ -4073,6 +4211,30 @@ void QuantizedMatmul::eval_gpu(const std::vector<array>& inputs, array& out) {
                   has_bias);
             }
           } else {
+            // Bandwidth-bound fp8 GEMV: one warp per column, 128-bit loads.
+            // The generic warp-shared fp8 path reaches only ~25-60 GB/s at
+            // decode shapes on 16-CU gfx1200; this kernel is the fast path.
+            static const bool fp8_gemv_off =
+                std::getenv("MLX_ROCM_QMV_NO_FP8_GEMV") != nullptr;
+            if (BITS == 8 && !fp8_gemv_off && transpose_ &&
+                !can_use_batched_qmv && (K % 16) == 0 &&
+                (GROUP_SIZE % 16) == 0) {
+              dim3 fp8_block(32, 8);
+              dim3 fp8_grid((N + 7) / 8, 1);
+              enc.add_kernel_node(
+                  &rocm::qmv_fp8_gemv_kernel<T, GROUP_SIZE>,
+                  fp8_grid,
+                  fp8_block,
+                  0u,
+                  (const T*)x_ptr,
+                  w_ptr,
+                  (const uint8_t*)scales_ptr,
+                  (T*)out_ptr,
+                  M,
+                  N,
+                  K);
+              return;
+            }
             if (use_fast_qmv) {
               if (can_use_batched_qmv) {
                 if (fast_threads_per_col == 16) {
@@ -4255,6 +4417,7 @@ void QuantizedMatmul::eval_gpu(const std::vector<array>& inputs, array& out) {
     using float_id = local_type_identity<float>;
     using half_id = local_type_identity<__half>;
     using bf16_id = local_type_identity<hip_bfloat16>;
+    using u8_id = local_type_identity<uint8_t>;
     using bits2 = std::integral_constant<int, 2>;
     using bits4 = std::integral_constant<int, 4>;
     using bits5 = std::integral_constant<int, 5>;
@@ -4284,7 +4447,43 @@ void QuantizedMatmul::eval_gpu(const std::vector<array>& inputs, array& out) {
     }                                                        \
   } while (0)
 
-    if (x.dtype() == float32) {
+    // fp8 (E4M3) / fp4 (E2M1) non-affine quantization stores scales as
+    // uint8-encoded floats, NOT typed after x. Reading them through an
+    // x-typed ScaleT (this file used to) reads 4 bytes per 1-byte scale and
+    // overruns the scales buffer -> GPU memory fault (seen on gfx1200).
+    // Mirrors the CUDA fp_qmv.cu kernels, which take scales as uint8_t*.
+    if (mode_ != QuantizationMode::Affine) {
+      if (x.dtype() == float32) {
+        if (bits_ == 8)
+          DISPATCH_GROUP_SIZE(float_id{}, u8_id{}, bits8{});
+        else if (bits_ == 4)
+          DISPATCH_GROUP_SIZE(float_id{}, u8_id{}, bits4{});
+        else
+          throw std::runtime_error(
+              "Unsupported bits for QuantizedMatmul fp8/fp4 float32: " +
+              std::to_string(bits_));
+      } else if (x.dtype() == float16) {
+        if (bits_ == 8)
+          DISPATCH_GROUP_SIZE(half_id{}, u8_id{}, bits8{});
+        else if (bits_ == 4)
+          DISPATCH_GROUP_SIZE(half_id{}, u8_id{}, bits4{});
+        else
+          throw std::runtime_error(
+              "Unsupported bits for QuantizedMatmul fp8/fp4 float16: " +
+              std::to_string(bits_));
+      } else if (x.dtype() == bfloat16) {
+        if (bits_ == 8)
+          DISPATCH_GROUP_SIZE(bf16_id{}, u8_id{}, bits8{});
+        else if (bits_ == 4)
+          DISPATCH_GROUP_SIZE(bf16_id{}, u8_id{}, bits4{});
+        else
+          throw std::runtime_error(
+              "Unsupported bits for QuantizedMatmul fp8/fp4 bfloat16: " +
+              std::to_string(bits_));
+      } else {
+        throw std::runtime_error("Unsupported dtype for QuantizedMatmul");
+      }
+    } else if (x.dtype() == float32) {
       if (bits_ == 8)
         DISPATCH_GROUP_SIZE(float_id{}, float_id{}, bits8{});
       else if (bits_ == 5 && mode_ == QuantizationMode::Affine) {

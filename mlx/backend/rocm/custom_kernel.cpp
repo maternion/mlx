@@ -254,8 +254,7 @@ CustomKernelFunction hip_kernel(
             init_value,
             std::vector<ScalarArg>{},
             false,
-            shared_memory,
-            output_input_aliases),
+            shared_memory),
         std::move(inputs));
   };
 }
@@ -268,21 +267,10 @@ void CustomKernel::eval_gpu(
 
   std::vector<array> copies;
 
-  // Output index -> input index it aliases (reuses the buffer in place).
-  std::vector<int> alias_of(outputs.size(), -1);
-  for (auto& [oi, ii] : output_input_aliases_) {
-    if (oi >= 0 && oi < (int)outputs.size() && ii >= 0 &&
-        ii < (int)inputs.size())
-      alias_of[oi] = ii;
-  }
-
   // Allocate and initialize the output arrays
   for (size_t i = 0; i < outputs.size(); ++i) {
     auto& out = outputs[i];
-    if (alias_of[i] >= 0) {
-      // In-place: output shares the aliased input's device buffer.
-      out.copy_shared_buffer(inputs[alias_of[i]]);
-    } else if (init_value_) {
+    if (init_value_) {
       copies.emplace_back(init_value_.value(), out.dtype());
       fill_gpu(copies.back(), out, s);
     } else {

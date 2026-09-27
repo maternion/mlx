@@ -126,12 +126,29 @@ static void ensure_mlx_device_current() {
 // CUDA unified_malloc: managed if supported else host pinned.
 // ROCm discrete training: prefer real VRAM (hipMalloc) so we never spill GTT.
 // APU: fine-grained coherent. Managed only as explicit fallback.
+//
+// Workaround: on discrete RDNA GPUs without XNACK (gfx10/11/12, incl. gfx1200),
+// hipMalloc returns CPU-inaccessible VRAM. MLX's array::init / array::data<T>()
+// do direct CPU access, which segfaults. Use hipMallocManaged (which falls back
+// to hipMallocHost on non-XNACK systems) so CPU access works. GPU access is
+// PCIe-bound but correct. Override with MLX_ROCM_USE_VRAM=1 to force raw VRAM.
 inline void* unified_malloc(size_t size, bool& is_managed) {
   void* data = nullptr;
   hipError_t err;
   ensure_mlx_device_current();
 
-  if (use_finegrained()) {
+  static const bool force_vram =
+      std::getenv("MLX_ROCM_USE_VRAM") != nullptr;
+  static const bool use_managed =
+      std::getenv("MLX_ROCM_FINEGRAINED") != nullptr;
+
+  if (force_vram) {
+    err = hipMalloc(&data, size);
+    if (err == hipSuccess) {
+      is_managed = true;
+      return data;
+    }
+  } else if (use_finegrained() && !use_managed) {
     err = hipExtMallocWithFlags(&data, size, hipDeviceMallocFinegrained);
     if (err == hipSuccess) {
       is_managed = true;
@@ -199,7 +216,20 @@ SmallSizePool::SmallSizePool() {
   buffer_ = new Block[num_blocks];
   next_free_ = buffer_;
 
-  data_ = unified_malloc(small_pool_size, data_managed_);
+  // Scalars (≤8 B) are written directly by the CPU via array::init / data<T>()
+  // — no raw_ptr()/host_shadow staging. On a non-XNACK discrete GPU hipMalloc
+  // returns CPU-inaccessible VRAM, so those writes would segfault. Use pinned
+  // host RAM (hipHostMalloc) instead: CPU can write it directly, and the GPU
+  // accesses it via zero-copy over PCIe (fine for 8-byte scalars).
+  ensure_mlx_device_current();
+  hipError_t err =
+      hipHostMalloc(&data_, small_pool_size, hipHostMallocDefault);
+  if (err != hipSuccess || data_ == nullptr) {
+    // Fallback to the normal path if pinned alloc fails.
+    data_ = unified_malloc(small_pool_size, data_managed_);
+  } else {
+    data_managed_ = false; // host-pinned, not managed/VRAM
+  }
 
   auto curr = next_free_;
   for (size_t i = 1; i < static_cast<size_t>(num_blocks); ++i) {
@@ -823,7 +853,7 @@ void RocmAllocator::decode_arena_end() {
 }
 
 void RocmAllocator::ensure_host_shadow(RocmBuffer& buf) {
-  if (buf.device == -1) {
+  if (buf.alloc_stream == reinterpret_cast<void*>(static_cast<uintptr_t>(1))) {
     return;
   }
   if (buf.host_shadow == nullptr) {
@@ -855,6 +885,22 @@ void RocmAllocator::flush_host_shadow(RocmBuffer& buf) {
   }
   (void)hipMemcpy(buf.data, buf.host_shadow, buf.size, hipMemcpyHostToDevice);
   buf.host_dirty = false;
+}
+
+void RocmAllocator::mark_dirty_shadow(RocmBuffer* buf) {
+  std::lock_guard lock(mutex_);
+  dirty_shadows_.insert(buf);
+}
+
+void RocmAllocator::flush_all_dirty_shadows() {
+  std::lock_guard lock(mutex_);
+  for (auto* buf : dirty_shadows_) {
+    if (buf && buf->host_shadow && buf->host_dirty) {
+      (void)hipMemcpy(buf->data, buf->host_shadow, buf->size, hipMemcpyHostToDevice);
+      buf->host_dirty = false;
+    }
+  }
+  dirty_shadows_.clear();
 }
 
 size_t RocmAllocator::get_active_memory() const {
@@ -924,17 +970,38 @@ void* Buffer::raw_ptr() {
   }
   auto& cbuf = *static_cast<rocm::RocmBuffer*>(ptr_);
 
+  // Alien buffer: make_buffer() wrapping an external host pointer.
+  // Identified by the alien sentinel alloc_stream == (void*)1.
+  // The data pointer is already host-accessible — return it directly.
+  if (cbuf.alloc_stream ==
+      reinterpret_cast<void*>(static_cast<uintptr_t>(1))) {
+    return cbuf.data;
+  }
+
+  // Pinned host (hipHostMalloc, e.g. SmallSizePool scalars):
+  // is_managed == false, device == -1. CPU-accessible directly.
+  if (cbuf.device == -1 && !cbuf.is_managed) {
+    if (hipStreamQuery(nullptr) != hipSuccess) {
+      (void)hipStreamSynchronize(nullptr);
+    }
+    return cbuf.data;
+  }
+
+  // VRAM (hipMalloc device==-1, or hipMallocAsync device>=0):
+  // CPU-inaccessible on discrete GPUs. Stage through host_shadow:
+  // allocate a pinned host buffer, hipMemcpy VRAM→host, return host ptr.
+  // The dirty flag ensures the next GPU access flushes host→VRAM.
   if (cbuf.device == -1) {
     if (hipStreamQuery(nullptr) != hipSuccess) {
       (void)hipStreamSynchronize(nullptr);
     }
   } else {
-    // Discrete: host shadow (CUDA: move_to_unified_memory).
     (void)hipDeviceSynchronize();
-    rocm::allocator().ensure_host_shadow(cbuf);
-    return cbuf.host_shadow;
   }
-  return cbuf.data;
+  rocm::allocator().ensure_host_shadow(cbuf);
+  cbuf.host_dirty = true;
+  rocm::allocator().mark_dirty_shadow(&cbuf);
+  return cbuf.host_shadow;
 }
 
 bool can_reuse_alien_buffer(void* /*ptr*/) {

@@ -187,6 +187,107 @@ bool RMSNormVJP::is_equivalent(const Primitive& other) const {
   return eps_ == a_other.eps_;
 }
 
+array cross_entropy(
+    const array& logits,
+    const array& targets,
+    StreamOrDevice s_ /* = {} */) {
+  if (logits.ndim() < 1) {
+    throw std::invalid_argument(
+        "[cross_entropy] logits must have at least 1 dimension but got input "
+        "with 0 dimensions.");
+  }
+  auto expected = logits.shape();
+  expected.pop_back();
+  if (targets.shape() != expected) {
+    std::ostringstream msg;
+    msg << "[cross_entropy] targets shape " << targets.shape()
+        << " does not match logits shape " << logits.shape()
+        << " with the last axis removed.";
+    throw std::invalid_argument(msg.str());
+  }
+  if (!issubdtype(logits.dtype(), floating)) {
+    std::ostringstream msg;
+    msg << "[cross_entropy] Received unsupported logits type " << logits.dtype()
+        << ".";
+    throw std::invalid_argument(msg.str());
+  }
+  if (!issubdtype(targets.dtype(), integer)) {
+    std::ostringstream msg;
+    msg << "[cross_entropy] targets must be integer class indices but got "
+        << targets.dtype() << ".";
+    throw std::invalid_argument(msg.str());
+  }
+
+  auto s = to_stream(s_);
+  auto fallback = [s](const std::vector<array>& inputs) {
+    auto& x = inputs[0];
+    auto& y = inputs[1];
+    auto score =
+        squeeze(take_along_axis(x, expand_dims(y, -1, s), -1, s), -1, s);
+    auto loss = subtract(logsumexp(x, -1, /* keepdims= */ false, s), score, s);
+    return std::vector<array>{astype(loss, float32, s)};
+  };
+
+  auto passed_targets = astype(targets, int32, s);
+
+  if (!CrossEntropy::use_fallback(s)) {
+    return array(
+        expected,
+        float32,
+        std::make_shared<CrossEntropy>(s, fallback),
+        {logits, passed_targets});
+  }
+  return fallback({logits, passed_targets})[0];
+}
+
+std::vector<array> CrossEntropy::vjp(
+    const std::vector<array>& primals,
+    const std::vector<array>& cotangents,
+    const std::vector<int>& argnums,
+    const std::vector<array>& outputs) {
+  assert(primals.size() == 2);
+  assert(outputs.size() == 1);
+  assert(cotangents.size() == 1);
+
+  for (auto arg : argnums) {
+    if (arg != 0) {
+      throw std::invalid_argument(
+          "[cross_entropy] Cannot differentiate with respect to the targets.");
+    }
+  }
+
+  auto s = stream();
+  auto fallback = [s](const std::vector<array>& inputs) {
+    auto& x = inputs[0];
+    auto& y = inputs[1];
+    auto& loss = inputs[2];
+    auto& g = inputs[3];
+
+    auto score =
+        squeeze(take_along_axis(x, expand_dims(y, -1, s), -1, s), -1, s);
+    auto lse = add(loss, astype(score, float32, s), s);
+    auto p =
+        exp(subtract(astype(x, float32, s), expand_dims(lse, -1, s), s), s);
+    Shape class_shape(x.ndim(), 1);
+    class_shape.back() = x.shape(-1);
+    auto onehot = astype(
+        equal(
+            expand_dims(y, -1, s),
+            reshape(arange(x.shape(-1), y.dtype(), s), class_shape, s),
+            s),
+        float32,
+        s);
+    auto gx = multiply(expand_dims(g, -1, s), subtract(p, onehot, s), s);
+    return std::vector<array>{astype(gx, x.dtype(), s)};
+  };
+
+  return {array(
+      primals[0].shape(),
+      primals[0].dtype(),
+      std::make_shared<CrossEntropyVJP>(s, fallback),
+      {primals[0], primals[1], outputs[0], cotangents[0]})};
+}
+
 array layer_norm(
     const array& x,
     const std::optional<array>& weight,
@@ -618,7 +719,8 @@ array scaled_dot_product_attention(
     const std::string& mask_mode /* = "" */,
     std::optional<array> mask_arr /* = {} */,
     const std::optional<array>& sinks /* = {} */,
-    StreamOrDevice s /* = {}*/) {
+    bool force_fused /* = false */,
+    StreamOrDevice s /* = {} */) {
   for (const auto& tensor : {queries, keys, values}) {
     if (tensor.ndim() != 4) {
       std::ostringstream msg;
@@ -726,11 +828,9 @@ array scaled_dot_product_attention(
     auto k = inputs[1];
     auto v = inputs[2];
     if (n_repeats > 1) {
-      // Avoid high-rank broadcasted matmul for GQA in the fallback path.
-      // Some backends are unstable with that layout; repeating k/v heads keeps
-      // the computation in standard 4D matmul form.
-      k = repeat(k, n_repeats, 1, s);
-      v = repeat(v, n_repeats, 1, s);
+      q = unflatten(q, 1, {n_kv_heads, n_repeats}, s);
+      k = expand_dims(k, 2, s);
+      v = expand_dims(v, 2, s);
     }
     auto scores = matmul(q, swapaxes(k, -1, -2, s), s);
     if (has_arr_mask || do_causal) {
@@ -749,6 +849,14 @@ array scaled_dot_product_attention(
         return inputs[3];
       };
       auto mask = make_or_fetch_mask();
+
+      if (n_repeats > 1 && mask.ndim() >= 3) {
+        if (mask.shape(-3) == 1) {
+          mask = expand_dims(mask, -3, s);
+        } else {
+          mask = unflatten(mask, -3, {n_kv_heads, n_repeats}, s);
+        }
+      }
       if (mask.dtype() == bool_) {
         scores = where(
             mask, scores, array(finfo(scores.dtype()).min, scores.dtype()), s);
@@ -776,6 +884,9 @@ array scaled_dot_product_attention(
       scores = slice(scores, std::move(start), std::move(stop), s);
     }
     auto out = matmul(scores, v, s);
+    if (n_repeats > 1) {
+      out = flatten(out, 1, 2, s);
+    }
     return std::vector<array>{out};
   };
 
@@ -825,6 +936,7 @@ array scaled_dot_product_attention(
           do_causal,
           is_training,
           output_logsumexp,
+          force_fused,
           stream)) {
     if (has_bool_mask && !ScaledDotProductAttention::supports_bool_mask()) {
       // Convert bool mask to additive mask.
@@ -837,7 +949,13 @@ array scaled_dot_product_attention(
     }
     Shape out_shape{q.shape(0), q.shape(1), q.shape(2), v.shape(-1)};
     auto primitive = std::make_shared<ScaledDotProductAttention>(
-        stream, fallback, scale, do_causal, has_sinks, output_logsumexp);
+        stream,
+        fallback,
+        scale,
+        do_causal,
+        has_sinks,
+        output_logsumexp,
+        force_fused);
     if (output_logsumexp) {
       return array::make_arrays(
           {std::move(out_shape), Shape{q.shape(0), q.shape(1), q.shape(2), 1}},
@@ -903,7 +1021,8 @@ bool ScaledDotProductAttention::is_equivalent(const Primitive& other) const {
       static_cast<const ScaledDotProductAttention&>(other);
   return scale_ == a_other.scale_ && do_causal_ == a_other.do_causal_ &&
       has_sinks_ == a_other.has_sinks_ &&
-      output_logsumexp_ == a_other.output_logsumexp_;
+      output_logsumexp_ == a_other.output_logsumexp_ &&
+      force_fused_ == a_other.force_fused_;
 }
 
 bool ScaledDotProductAttentionVJP::is_equivalent(const Primitive& other) const {
@@ -944,6 +1063,53 @@ std::vector<Shape> Quantize::output_shapes(const std::vector<array>& inputs) {
 bool ConvertFP8::is_equivalent(const Primitive& other) const {
   const ConvertFP8& a_other = static_cast<const ConvertFP8&>(other);
   return to_fp8_ == a_other.to_fp8_;
+}
+
+// Stub eval_gpu for CrossEntropyVJP — the fallback path is used on all
+// backends, but the vtable symbol must be defined somewhere.
+void CrossEntropyVJP::eval_gpu(
+    const std::vector<array>& /*inputs*/,
+    std::vector<array>& /*outputs*/) {
+  throw std::runtime_error("CrossEntropyVJP::eval_gpu not implemented");
+}
+
+// Stub eval_gpu for CrossEntropy — same reason.
+void CrossEntropy::eval_gpu(
+    const std::vector<array>& /*inputs*/,
+    std::vector<array>& /*outputs*/) {
+  throw std::runtime_error("CrossEntropy::eval_gpu not implemented");
+}
+
+bool CrossEntropy::use_fallback(Stream /*s*/) {
+  return true; // always use fallback on ROCm
+}
+
+// Stub metal_kernel — not available on ROCm backend.
+CustomKernelFunction metal_kernel(
+    const std::string&,
+    const std::vector<std::string>&,
+    const std::vector<std::string>&,
+    const std::string&,
+    const std::string&,
+    bool,
+    bool,
+    const CompileOptions&) {
+  throw std::runtime_error("metal_kernel not available on ROCm backend");
+}
+
+// Declared for mlxc's C binding (patch 0002); the fused kernel is Metal-only
+// upstream and the Go runner gates it behind MetalIsAvailable, so this is
+// unreachable on ROCm.
+std::vector<array> gated_delta_update(
+    const array&,
+    const array&,
+    const array&,
+    const array&,
+    const array&,
+    const std::optional<array>&,
+    const std::optional<array>&,
+    StreamOrDevice) {
+  throw std::runtime_error("gated_delta_update not available on ROCm backend");
 }
 
 } // namespace mlx::core::fast
