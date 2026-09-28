@@ -871,12 +871,16 @@ inline int dequant_cache_capacity() {
   static int capacity = []() {
     const char* raw = std::getenv("MLX_ROCM_QMM_DEQUANT_CACHE_SIZE");
     if (raw == nullptr || *raw == '\0') {
-      return 8;
+      // Default raised from 8: a typical transformer has O(layers*projections)
+      // distinct quantized weights (e.g. ~144 for a 24-layer 0.8B). 8 entries
+      // thrashes every layer on prefill; 256 fits a whole small model and the
+      // max_bytes cap protects larger ones.
+      return 256;
     }
     char* end = nullptr;
     long value = std::strtol(raw, &end, 10);
     if (end == raw || *end != '\0' || value < 0) {
-      return 8;
+      return 256;
     }
     return static_cast<int>(value);
   }();
@@ -885,7 +889,7 @@ inline int dequant_cache_capacity() {
 
 inline size_t dequant_cache_max_bytes() {
   static size_t max_bytes = parse_non_negative_size_t_env(
-      "MLX_ROCM_QMM_DEQUANT_CACHE_MAX_BYTES", 256ULL * 1024ULL * 1024ULL);
+      "MLX_ROCM_QMM_DEQUANT_CACHE_MAX_BYTES", 1024ULL * 1024ULL * 1024ULL);
   return max_bytes;
 }
 
@@ -3468,7 +3472,24 @@ void QuantizedMatmul::eval_gpu(const std::vector<array>& inputs, array& out) {
   bool force_dequant_gemm = !transpose_ || !bits_supported_by_qmv ||
       ((batch_count > 1) && !can_use_batched_qmv) ||
       (w.ndim() > 2 && !w_singleton_batch && !can_use_batched_qmv);
-  bool dequant_gemm_supported_mode = (mode_ == QuantizationMode::Affine);
+  // Opt-in fast path: mxfp8/mxfp4/nvfp4 prefill runs the dequant->bf16 GEMM
+  // (hipBLASLt) instead of the qmv_fp8_gemv_kernel (no M dimension, weight
+  // re-streamed ceil(M/16) times). fp_dequantize already handles non-affine
+  // modes (E8M0/E4M3 block scales), so the only thing that gated them out was
+  // this single check. Off by default to preserve the working build; enable
+  // with MLX_ROCM_MXFP8_GEMM=1. Direct hipBLASLt VEC32_UE8M0 block-scaled GEMM
+  // crashes on gfx1200 (rocRoller swizzle SIGFPE), so this bf16-shadow route
+  // is the only functional mxfp8 prefill GEMM on RDNA4 today.
+  static const bool mxfp8_dequant_gemm_enabled = [] {
+    const char* e = std::getenv("MLX_ROCM_MXFP8_GEMM");
+    return e && (e[0] == '1' || e[0] == 'o' || e[0] == 'O');
+  }();
+  bool dequant_gemm_supported_mode =
+      (mode_ == QuantizationMode::Affine) ||
+      (mxfp8_dequant_gemm_enabled &&
+       (mode_ == QuantizationMode::Mxfp8 ||
+        mode_ == QuantizationMode::Mxfp4 ||
+        mode_ == QuantizationMode::Nvfp4));
   bool should_prefer_dequant = should_use_dequant_gemm_path(
       M, N, K, batch_count, non_batched, transpose_, can_use_batched_qmv, d);
 

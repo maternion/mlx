@@ -236,46 +236,74 @@ __global__ void __launch_bounds__(256)
 
     // ---- Online softmax: each wave processes its own 16 query rows ----
     // Dynamic smem slot for per-row scale_old (avoids static/dynamic LDS aliasing).
+    // Cooperative wave-32 online softmax.
+    // All 32 lanes of the wave cooperate on each of the 16 rows owned by this
+    // wave, instead of one lane serially scanning all BLOCK_N keys per row.
+    // BLOCK_N=64 / 32 lanes = 2 vals/lane; max and sum reduce via __shfl_xor
+    // butterfly (1+2+4+8+16). Rows are processed sequentially within the wave.
+    // exp2f + LOG2E fold is used instead of expf (maps to a native RDNA SFU
+    // instruction and is the standard FlashAttention-2 optimization).
     float* wave_scale = reinterpret_cast<float*>(
         reinterpret_cast<char*>(S_sh) + BLOCK_M * S_PAD * sizeof(float));
-    if (lane < WT) {
-      int row = wave * WT + lane; // 0..BLOCK_M-1, one row per lane of this wave
+    constexpr float LOG2E = 1.4426950408889634f;
+    constexpr int VALS_PER_LANE = BLOCK_N / 32; // 2 for BLOCK_N=64
+    #pragma unroll 1
+    for (int r_local = 0; r_local < WT; ++r_local) {
+      int row = wave * WT + r_local;
       int q_idx = q_start + row;
       bool valid = q_idx < params.qL;
-      float old_m = m_arr[row];
-      float old_l = l_arr[row];
-
-      float new_m = old_m;
-      if (valid) {
-        for (int j = 0; j < BLOCK_N && (k_start + j) < params.kL; j++) {
-          bool use = true;
-          if constexpr (do_causal)
-            use = (k_start + j) <= (params.kL - params.qL + q_idx);
-          if (use)
-            new_m = fmaxf(new_m, S_sh[row * S_PAD + j]);
-        }
-      }
-
-      float scale_old = (old_m > -1e29f) ? expf(old_m - new_m) : 0.0f;
-      float row_sum = 0.0f;
-
-      for (int j = 0; j < BLOCK_N; j++) {
+      // Per-lane local max over VALS_PER_LANE columns.
+      float local_max = -1e30f;
+      #pragma unroll
+      for (int k = 0; k < VALS_PER_LANE; ++k) {
+        int j = lane + k * 32;
         bool use = valid && (k_start + j) < params.kL;
         if constexpr (do_causal)
           use = use && ((k_start + j) <= (params.kL - params.qL + q_idx));
+        if (use)
+          local_max = fmaxf(local_max, S_sh[row * S_PAD + j]);
+      }
+      // Wave butterfly max.
+      local_max = fmaxf(local_max, __shfl_xor(local_max, 1));
+      local_max = fmaxf(local_max, __shfl_xor(local_max, 2));
+      local_max = fmaxf(local_max, __shfl_xor(local_max, 4));
+      local_max = fmaxf(local_max, __shfl_xor(local_max, 8));
+      local_max = fmaxf(local_max, __shfl_xor(local_max, 16));
+      float new_m = local_max;
 
+      float old_m = m_arr[row];
+      float old_l = l_arr[row];
+      float scale_old =
+          (old_m > -1e29f) ? exp2f((old_m - new_m) * LOG2E) : 0.0f;
+
+      // Per-lane local sum-of-exp (writes exp back to LDS for P@V).
+      float local_sum = 0.0f;
+      #pragma unroll
+      for (int k = 0; k < VALS_PER_LANE; ++k) {
+        int j = lane + k * 32;
+        bool use = valid && (k_start + j) < params.kL;
+        if constexpr (do_causal)
+          use = use && ((k_start + j) <= (params.kL - params.qL + q_idx));
         if (use) {
-          float p = expf(S_sh[row * S_PAD + j] - new_m);
+          float p = exp2f((S_sh[row * S_PAD + j] - new_m) * LOG2E);
           S_sh[row * S_PAD + j] = p;
-          row_sum += p;
+          local_sum += p;
         } else {
           S_sh[row * S_PAD + j] = 0.0f;
         }
       }
+      // Wave butterfly sum.
+      local_sum += __shfl_xor(local_sum, 1);
+      local_sum += __shfl_xor(local_sum, 2);
+      local_sum += __shfl_xor(local_sum, 4);
+      local_sum += __shfl_xor(local_sum, 8);
+      local_sum += __shfl_xor(local_sum, 16);
 
-      m_arr[row] = new_m;
-      l_arr[row] = old_l * scale_old + row_sum;
-      wave_scale[row] = scale_old;
+      if (lane == 0) {
+        m_arr[row] = new_m;
+        l_arr[row] = old_l * scale_old + local_sum;
+        wave_scale[row] = scale_old;
+      }
     }
     __syncthreads();
 

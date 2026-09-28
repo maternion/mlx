@@ -82,6 +82,13 @@ device_info_impl(int device_index) {
       dev.info["compute_capability_major"] = static_cast<size_t>(prop.major);
       dev.info["compute_capability_minor"] = static_cast<size_t>(prop.minor);
 
+      // Discrete AMD GPUs have no Metal-style "wired" residency limit; expose
+      // the full HBM as the recommended working set so callers (e.g. ollama's
+      // mlxrunner) that require this key don't bail out of memory tuning.
+      dev.info["max_recommended_working_set_size"] =
+          static_cast<size_t>(prop.totalGlobalMem);
+      dev.info["memory_size"] = static_cast<size_t>(prop.totalGlobalMem);
+
       devices.push_back(std::move(dev));
     }
     return devices;
